@@ -38,8 +38,9 @@ double DEFAULT_MIN_TEMP = 35.; // TODO: get from database
 double currentMaxTemp = 35.; // TODO: get from database
 double currentMinTemp = 10.; // TODO: get from database
 
-// https://jwt.io/#debugger-io?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb21wYW55IjoiRGV2Ym94IEVuZ2luZWVyaW5nIiwiY2xpZW50IjoiQ29vcGFuZXN0IiwiZ2VuZXJhdGVkQXQiOiIyMDIxLTA5LTA3VDE3OjIyOjAwOjAwMDBaIn0.77BoCA4wvJj57pdofvgj_df9KrkuDilx_lGo7McmBAk
-char *server_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb21wYW55IjoiRGV2Ym94IEVuZ2luZWVyaW5nIiwiY2xpZW50IjoiQ29vcGFuZXN0IiwiZ2VuZXJhdGVkQXQiOiIyMDIxLTA5LTA3VDE3OjIyOjAwOjAwMDBaIn0.77BoCA4wvJj57pdofvgj_df9KrkuDilx_lGo7McmBAk"; // TODO: get from database
+// From Base64 = coopanest_devbox!17.09.2021!
+char *server_token = "Y29vcGFuZXN0X2RldmJveCExNy4wOS4yMDIxIQ=="; // TODO: get from database
+char auth[256];
 /*
  *  ======================================================================================
  *
@@ -163,7 +164,7 @@ void getSettingsFromDB()
 }
 
 // Logs an error to wherever we need to
-void logError(String error)
+void logError(const char *error)
 {
   Serial.println("ERROR:");
   Serial.println(error);
@@ -261,7 +262,7 @@ void resetTemps()
  * 
  * =======================================================================================
  */
-char auth[256];
+
 // Creates all the routes of the application
 void setRoutes()
 {
@@ -272,9 +273,12 @@ void setRoutes()
   baseRoute.post("/turnoff/all", &handleTurnOffAllAirRoute);
   baseRoute.post("/setvar/mintemp/:temp", &handleSetMinTempRoute);
   baseRoute.post("/setvar/maxtemp/:temp", &handleSetMaxTempRoute);
+  baseRoute.get("/getvar/mintemp", &handleGetMinTempRoute);
+  baseRoute.get("/getvar/maxtemp", &handleGetMaxTempRoute);
   baseRoute.post("/setvar/resettemps", &handleResetTempsRoute);
 
   app.options(BASE_ROUTE, &handleCors);
+
   app.header("Authorization", auth, sizeof(auth));
   app.use(&handleAccessSecurity);
   app.use(BASE_ROUTE, &baseRoute);
@@ -293,20 +297,22 @@ void handleAccessSecurity(Request &req, Response &res)
     res.sendStatus(401);
     res.end();
   }
+  free(tokenSent);
+  free(auth);
 }
 
 void handleCors(Request &req, Response &res)
 {
   req.setTimeout(DEFAULT_CONNECTION_TIMEOUT);
   res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Methods", "GET, HEAD");
+  res.set("Access-Control-Allow-Methods", "GET, POST, HEAD");
 }
 
 // Handles the GET method of the "/temp" to read temperature.
 void handleGetTempRoute(Request &req, Response &res)
 {
   float temp = readTemperatureSensor();
-  if (temp >= 0)
+  if (temp >= 0 && temp <= 100)
   {
     res.set("Content-Type", "application/json");
     res.print("{ \"data\": { \"temperature\": ");
@@ -318,8 +324,8 @@ void handleGetTempRoute(Request &req, Response &res)
   }
   else
   {
+    //logError(Error::ERROR_MSG_READ_TEMP);
     res.sendStatus(500);
-    logError(Error::ERROR_MSG_READ_TEMP);
   }
 }
 
@@ -332,16 +338,18 @@ void handleTurnOnSingleAirRoute(Request &req, Response &res)
   //Turns on the air-conditioner
   if (turnAirConditionerOn(airNumber))
   {
+    // Logs to serial
+    Serial.println("----------------------------------------------------------------");
+    Serial.print("Turning on air number ");
+    Serial.println(airNumber);
     res.sendStatus(200);
   }
   else
   {
+    // Logs to serial
+    logError("Error turning on air number " + airNumber);
     res.sendStatus(400);
   }
-  // Logs to serial
-  Serial.println("----------------------------------------------------------------");
-  Serial.print("Turned [ON] air number ");
-  Serial.println(airNumber);
 }
 
 // Handles the POST method of the route "/turnoff/single/:airNumber"
@@ -351,11 +359,18 @@ void handleTurnOffSingleAirRoute(Request &req, Response &res)
   // Extracts the air number from the request
   int airNumber = getAirNumberAsIntFromRequest(req);
   //Turns off the air-conditioner
-  turnAirConditionerOff(airNumber);
-  // Logs to serial
-  Serial.println("----------------------------------------------------------------");
-  Serial.print("Turned [OFF] air number ");
-  Serial.println(airNumber);
+  if (turnAirConditionerOff(airNumber))
+  {
+    // Logs to serial
+    logError("Turning off air number " + airNumber);
+    res.sendStatus(200);
+  }
+  else
+  {
+    // Logs to serial
+    logError("Error turning off air number " + airNumber);
+    res.sendStatus(400);
+  }
 }
 
 // Handles the POST method of the route "/turnoff/all"
@@ -370,11 +385,9 @@ void handleTurnOnAllAirRoute(Request &req, Response &res)
   }
   else
   {
+    logError("Error turning on all air-conditioners");
     res.sendStatus(400);
   }
-  // Logs to Serial
-  Serial.println("----------------------------------------------------------------");
-  Serial.println("Turned [ON] all air-conditioners!");
 }
 
 // Handles the POST method of the route "/turnoff/all"
@@ -382,11 +395,16 @@ void handleTurnOnAllAirRoute(Request &req, Response &res)
 void handleTurnOffAllAirRoute(Request &req, Response &res)
 {
   // Turn devices off
-  turnAirConditionerOff(1);
-  turnAirConditionerOff(2);
-  // Logs to Serial
-  Serial.println("----------------------------------------------------------------");
-  Serial.println("Turned [OFF] all air-conditioners!");
+  if (turnAirConditionerOff(1) &&
+      turnAirConditionerOff(2))
+  {
+    res.sendStatus(200);
+  }
+  else
+  {
+    logError("Error turning off all air-conditioners");
+    res.sendStatus(400);
+  }
 }
 
 // Handles the POST method of the route "/setvar/mintemp"
@@ -394,7 +412,8 @@ void handleTurnOffAllAirRoute(Request &req, Response &res)
 void handleSetMinTempRoute(Request &req, Response &res)
 {
   setMinTemp(getTempAsDoubleFromRequest(req));
-
+  // TODO: handle error
+  res.sendStatus(200);
   // Logs to Serial
   Serial.println("----------------------------------------------------------------");
   Serial.println("The minimum temperature was set to ");
@@ -407,6 +426,8 @@ void handleSetMinTempRoute(Request &req, Response &res)
 void handleSetMaxTempRoute(Request &req, Response &res)
 {
   setMaxTemp(getTempAsDoubleFromRequest(req));
+  // TODO: handle error
+  res.sendStatus(200);
 
   // Logs to Serial
   Serial.println("----------------------------------------------------------------");
@@ -415,11 +436,46 @@ void handleSetMaxTempRoute(Request &req, Response &res)
   Serial.println("*C.");
 }
 
+// Handles the GET method of the route "/getvar/mintemp"
+// to get the var of the minimum tempeperature allowed
+void handleGetMinTempRoute(Request &req, Response &res)
+{
+  // TODO: handle error
+
+  res.set("Content-Type", "application/json");
+  res.print("{ \"data\": { \"minTemperature\": ");
+  res.print(currentMinTemp);
+  res.print(" } }");
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.print("The minimum temperature is ");
+  Serial.print(currentMinTemp);
+  Serial.println("*C.");
+}
+
+// Handles the GET method of the route "/getvar/mintemp"
+// to get the var of the minimum tempeperature allowed
+void handleGetMaxTempRoute(Request &req, Response &res)
+{
+  // TODO: handle error
+
+  res.set("Content-Type", "application/json");
+  res.print("{ \"data\": { \"maxTemperature\": ");
+  res.print(currentMaxTemp);
+  res.print(" } }");
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.print("The maximum temperature is ");
+  Serial.print(currentMinTemp);
+  Serial.println("*C.");
+}
+
 // Handles the POST method of the route "/setvar/mintemp"
 // to set the var of the minimum tempeperature allowed
 void handleResetTempsRoute(Request &req, Response &res)
 {
   resetTemps();
+  // TODO: handle error
 
   // Logs to Serial
   Serial.println("----------------------------------------------------------------");
@@ -462,8 +518,9 @@ int getTempAsDoubleFromRequest(Request &req)
   return tempAsDouble;
 }
 
+// Verify if the given token equals the server secret
 boolean isTokenVerified(char *token)
 {
   const char *key = token;
-  return strcmp(token, server_key) == 0;
+  return strcmp(token, server_token) == 0;
 }
