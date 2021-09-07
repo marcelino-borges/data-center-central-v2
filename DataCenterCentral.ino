@@ -3,6 +3,8 @@
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <Ethernet.h>
+#include <aWOT.h>
+#include <IRremote.h>
 #include "HttpResponse.h"
 #include "Error.h"
 
@@ -10,42 +12,60 @@
 #define AIR2_PIN 3
 #define DHT_PIN 7
 #define DHT_TYPE DHT11
+#define PORT 3000
 
 /*
  *  ======================================================================================
- *  Solution Variables
+ *
+ *  Global constants
+ * 
  *  ======================================================================================
  */
 
-const String WELCOME_MSG = "Devbox Data Center";
-const String BASE_ROUTE = "/server/v1/";
-const String GET_METHOD_TYPE = "GET";
-const String POST_METHOD_TYPE = "POST";
-const String SUBROUTE_GET_TEMP = "temp";
-const String SUBROUTE_TURN_ON = "turnon";
-
-int IP_ADDRESS[] = {192, 168, 15, 100};
-int PORT = 3000;
-int CONNECTION_TIMEOUT = 3000;
+const char BASE_ROUTE[] = "/server/v1";
+const int DEFAULT_CONNECTION_TIMEOUT = 3000;
 
 /*
  *  ======================================================================================
+ *
+ *  Global variables
+ * 
+ *  ======================================================================================
+ */
+double DEFAULT_MAX_TEMP = 35.; // TODO: get from database
+double DEFAULT_MIN_TEMP = 35.; // TODO: get from database
+
+double currentMaxTemp = 35.; // TODO: get from database
+double currentMinTemp = 10.; // TODO: get from database
+
+// https://jwt.io/#debugger-io?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb21wYW55IjoiRGV2Ym94IEVuZ2luZWVyaW5nIiwiY2xpZW50IjoiQ29vcGFuZXN0IiwiZ2VuZXJhdGVkQXQiOiIyMDIxLTA5LTA3VDE3OjIyOjAwOjAwMDBaIn0.77BoCA4wvJj57pdofvgj_df9KrkuDilx_lGo7McmBAk
+char *server_key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb21wYW55IjoiRGV2Ym94IEVuZ2luZWVyaW5nIiwiY2xpZW50IjoiQ29vcGFuZXN0IiwiZ2VuZXJhdGVkQXQiOiIyMDIxLTA5LTA3VDE3OjIyOjAwOjAwMDBaIn0.77BoCA4wvJj57pdofvgj_df9KrkuDilx_lGo7McmBAk"; // TODO: get from database
+/*
+ *  ======================================================================================
+ *
  *  Initial setup
+ * 
  *  ======================================================================================
  */
 
 // IP address where the ethernet shield is connected to (seen in cmd > "/ipconfig")
-IPAddress ip(IP_ADDRESS[0], IP_ADDRESS[1], IP_ADDRESS[2], IP_ADDRESS[3]);
+IPAddress ip(192, 168, 15, 100);
 // PORT
 EthernetServer server(PORT);
 // Default MAC
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 // Temperature sensor
 DHT_Unified dht(DHT_PIN, DHT_TYPE);
+// HTTP App
+Application app;
+// Base route path
+Router baseRoute;
 
 /*
  *  ======================================================================================
- *  Methods
+ *
+ *  Arduino's methods
+ * 
  *  ======================================================================================
  */
 
@@ -56,7 +76,7 @@ void setup()
   {
     ; // wait for serial port to connect. Needed for native USB port only
   }
-  Serial.println(WELCOME_MSG);
+  Serial.println("Devbox Engineering - Data Center Central - Cloud");
   dht.begin();
   pinMode(AIR1_PIN, OUTPUT);
   pinMode(AIR2_PIN, OUTPUT);
@@ -68,6 +88,8 @@ void setup()
 
   validateEthernet();
   initializeServer();
+  setRoutes();
+  getSettingsFromDB();
 }
 
 void loop()
@@ -76,66 +98,30 @@ void loop()
   EthernetClient client = server.available();
   if (client)
   {
-    Serial.println("new client");
-    client.setConnectionTimeout(CONNECTION_TIMEOUT);
-    client.setTimeout(CONNECTION_TIMEOUT);
-    // an http request ends with a blank line
-    boolean currentLineIsBlank = true;
-    String req = "";
-    while (client.connected())
+    Serial.println("New client incoming.");
+    client.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
+
+    if (client.connected())
     {
-      if (client.available())
-      {
-        char c = client.read();
-        req.concat(c);
-
-        // if you've gotten to the end of the line (received a newline
-        // character) and the line is blank, the http request has ended,
-        // so you can send a reply
-        if (c == '\n' && currentLineIsBlank)
-        {
-          HttpResponse response = processRequest(req);
-          DynamicJsonDocument json(512);
-
-          json["data"] = response.data;
-          json["error"] = response.error;
-          json["code"] = response.code;
-
-          Serial.println("-----------------------------------------------------");
-          Serial.println("Json to send:");
-          serializeJson(json, Serial);
-          Serial.println("\n");
-
-          client.print("HTTP/1.1 ");
-          client.println(response.code);
-          client.println("Content-Type: text/html");
-          client.println("Content-Type: application/json");
-          client.println("Connection: close"); // the connection will be closed after completion of the response
-          client.println("Refresh: 5");        // refresh the page automatically every 5 sec
-          client.println();
-          serializeJson(json, client);
-          break;
-        }
-        if (c == '\n')
-        {
-          // you're starting a new line
-          currentLineIsBlank = true;
-        }
-        else if (c != '\r')
-        {
-          // you've gotten a character on the current line
-          currentLineIsBlank = false;
-        }
-      }
+      app.process(&client);
     }
     // give the web browser time to receive the data
     delay(1);
     // close the connection:
     client.stop();
-    Serial.println("client disconnected");
+    Serial.println("Client disconnected!");
   }
 }
 
+/*
+ *  ======================================================================================
+ *
+ *  Solution methods
+ * 
+ *  ======================================================================================
+ */
+
+//Validates if we have hardware and ethernet cable plugged in
 bool validateEthernet()
 {
   // Check for Ethernet hardware present
@@ -153,6 +139,7 @@ bool validateEthernet()
   }
 }
 
+// Calls the Begin() from the server and logs to Serial it's initialization
 void initializeServer()
 {
   server.begin();
@@ -162,124 +149,54 @@ void initializeServer()
   Serial.println(PORT);
 }
 
+void getSettingsFromDB()
+{
+  // TODO: Implement
+  // dbSettings = getDBSettings();
+  // currentMaxTemp = dbSettings.currentMaxTemp;
+  // currentMinTemp = dbSettings.currentMinTemp;
+  // DEFAULT_MAX_TEMP = dbSettings.defaultMaxTemp;
+  // DEFAULT_MIN_TEMP = dbSettings.defaultMinTemp;
+  // server_key = dbSettings.token;
+  // if(erro)
+  //   Serial.println("Error xxxxxx");
+}
+
+// Logs an error to wherever we need to
 void logError(String error)
 {
   Serial.println("ERROR:");
   Serial.println(error);
+  // TODO: Log to database all errors
 }
 
-float getTemperature()
+// Gets the temperature read by our internal sensor DHT11.
+float readTemperatureSensor()
 {
   sensors_event_t event;
   dht.temperature().getEvent(&event);
   if (isnan(event.temperature))
   {
-    Serial.println(Error::ERROR_MSG_READ_TEMP);
-    logError(Error::ERROR_MSG_READ_TEMP);
     return -1.0;
   }
   else
   {
-    float temperature = event.temperature;
-    String tempMsg = String("Temperature read: ") + String(temperature) + String(" *C");
-    return temperature;
+    return event.temperature;
   }
 }
 
-HttpResponse processRequest(String req)
-{
-  // Getting method type from the request
-  String method_type = req.substring(0, req.indexOf(BASE_ROUTE));
-  method_type.trim();
-  // Getting the route from the request
-  String route = req.substring(req.indexOf(BASE_ROUTE), req.indexOf("HTTP/"));
-  route.trim();
-
-  if (method_type.equals(GET_METHOD_TYPE))
-  {
-    String subroute = removeBaseRoute(route);
-
-    if (subroute.equals(SUBROUTE_GET_TEMP))
-    {
-      float temp = getTemperature();
-
-      Serial.println("-----------------------------------------------------");
-      Serial.print("Temperature read on a GET call: ");
-      Serial.println(temp);
-      HttpResponse *response = new HttpResponse(temp);
-      return *response;
-    }
-    else
-    {
-      HttpResponse *response = new HttpResponse(Error::ERROR_MSG_UNKNOWN_SUBROUTE +
-                                                    String(" Route requested: ") +
-                                                    route +
-                                                    String(". Method requested: ") +
-                                                    method_type,
-                                                400);
-      return *response;
-    }
-  }
-  else if (method_type.equals(POST_METHOD_TYPE))
-  {
-    String subroute = removeBaseRoute(route);
-
-    if (subroute.startsWith(SUBROUTE_TURN_ON))
-    {
-      String airNumber = subroute;
-      airNumber.replace(SUBROUTE_TURN_ON + "/", "");
-      Serial.println("-----------------------------------------------------");
-      Serial.print("Turning on air-conditioner ");
-      Serial.println(airNumber);
-
-      // Allow only numbers 1 and 2 as air conditioner
-      if (!airNumber.equals("1") && !airNumber.equals("2"))
-      {
-        HttpResponse *response = new HttpResponse(
-            Error::ERROR_MSG_TURNON_UNKNOWN_AIR +
-                String(" Route requested: ") +
-                route +
-                String(". Method requested: ") +
-                method_type,
-            400);
-        Serial.println("-----------------------------------------------------");
-        Serial.print("response->error: ");
-        Serial.println(response->error);
-        return *response;
-      }
-      else
-      {
-        turnAirConditionerOn(airNumber.toInt(), true);
-        HttpResponse *response = new HttpResponse("Air-conditioner " + airNumber + " activated.");
-        return *response;
-      }
-    }
-  }
-  else
-  {
-    HttpResponse *response = new HttpResponse(Error::ERROR_MSG_INVALID_HTTP_METHOD_TYPE +
-                                                  String(" Method requested: ") +
-                                                  method_type,
-                                              404);
-
-    return *response;
-  }
-}
-
-String removeBaseRoute(String route)
-{
-  String subroute = route;
-  subroute.replace(BASE_ROUTE, "");
-  return subroute;
-}
-
-void turnAirConditionerOn(int airNumber, boolean solo)
+// Effectively turns an air-conditioner ON by it's number (1 or 2).
+// If [solo] parameter is passed as true, the air passed is turned
+// on and the other one is turned off.
+boolean turnAirConditionerOn(int airNumber, boolean solo = false)
 {
   if (airNumber == 1)
   {
     digitalWrite(AIR1_PIN, HIGH);
     if (solo)
       digitalWrite(AIR2_PIN, LOW);
+
+    return true;
   }
   else if (airNumber == 2)
   {
@@ -287,9 +204,266 @@ void turnAirConditionerOn(int airNumber, boolean solo)
     if (solo)
       digitalWrite(AIR1_PIN, LOW);
   }
+  else
+  {
+    return false;
+  }
+
   Serial.println("-----------------------------------------------------");
-  Serial.print("Air number ");
+  Serial.print("Activated air number ");
   Serial.print(airNumber);
-  Serial.print(" activated");
   Serial.println(solo ? " solo." : ".");
+
+  return true;
+}
+
+// Effectively turns an air-conditioner OFF by it's number (1 or 2).
+boolean turnAirConditionerOff(int airNumber)
+{
+  if (airNumber == 1)
+    digitalWrite(AIR1_PIN, LOW);
+  else if (airNumber == 2)
+    digitalWrite(AIR2_PIN, LOW);
+  else
+    return false;
+
+  Serial.println("-----------------------------------------------------");
+  Serial.print("Deactivated air number ");
+  Serial.print(airNumber);
+
+  return true;
+}
+
+// Sets the variable [CURRENT_MIN_TEMP] to the value of the paremeter's value
+void setMinTemp(double newTemp)
+{
+  currentMinTemp = newTemp;
+}
+
+// Sets the variable [CURRENT_MAX_TEMP] to the value of the paremeter's value
+void setMaxTemp(double newTemp)
+{
+  currentMaxTemp = newTemp;
+}
+
+// Resets both [CURRENT_MIN_TEMP] and [CURRENT_MAX_TEMP] temperatures variables
+// to default values: [DEFAULT_MIN_TEMP] and [DEFAULT_MAX_TEMP]
+void resetTemps()
+{
+  currentMaxTemp = DEFAULT_MAX_TEMP;
+  currentMinTemp = DEFAULT_MIN_TEMP;
+}
+
+/*
+ * =======================================================================================
+ *
+ * Routes & Routes handlers
+ * 
+ * =======================================================================================
+ */
+char auth[256];
+// Creates all the routes of the application
+void setRoutes()
+{
+  baseRoute.get("/temp", &handleGetTempRoute);
+  baseRoute.post("/turnon/single/:airNumber", &handleTurnOnSingleAirRoute);
+  baseRoute.post("/turnon/all", &handleTurnOnAllAirRoute);
+  baseRoute.post("/turnoff/single/:airNumber", &handleTurnOffSingleAirRoute);
+  baseRoute.post("/turnoff/all", &handleTurnOffAllAirRoute);
+  baseRoute.post("/setvar/mintemp/:temp", &handleSetMinTempRoute);
+  baseRoute.post("/setvar/maxtemp/:temp", &handleSetMaxTempRoute);
+  baseRoute.post("/setvar/resettemps", &handleResetTempsRoute);
+
+  app.options(BASE_ROUTE, &handleCors);
+  app.header("Authorization", auth, sizeof(auth));
+  app.use(&handleAccessSecurity);
+  app.use(BASE_ROUTE, &baseRoute);
+}
+
+void handleAccessSecurity(Request &req, Response &res)
+{
+  char *tokenSent = req.get("Authorization");
+
+  Serial.print("Token sent: ");
+  Serial.println(tokenSent);
+  if (!isTokenVerified(tokenSent))
+  {
+    Serial.print("Authentication failed for the route: ");
+    Serial.println(req.path());
+    res.sendStatus(401);
+    res.end();
+  }
+}
+
+void handleCors(Request &req, Response &res)
+{
+  req.setTimeout(DEFAULT_CONNECTION_TIMEOUT);
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET, HEAD");
+}
+
+// Handles the GET method of the "/temp" to read temperature.
+void handleGetTempRoute(Request &req, Response &res)
+{
+  float temp = readTemperatureSensor();
+  if (temp >= 0)
+  {
+    res.set("Content-Type", "application/json");
+    res.print("{ \"data\": { \"temperature\": ");
+    res.print(temp);
+    res.print(" } }");
+    Serial.print("getTemp: ");
+    Serial.print(temp);
+    Serial.println("*C");
+  }
+  else
+  {
+    res.sendStatus(500);
+    logError(Error::ERROR_MSG_READ_TEMP);
+  }
+}
+
+// Handles the POST method of the "/turnon/single/:airNumber"
+// route to turn on a single air-conditioner.
+void handleTurnOnSingleAirRoute(Request &req, Response &res)
+{
+  // Extracts the a number from the request
+  int airNumber = getAirNumberAsIntFromRequest(req);
+  //Turns on the air-conditioner
+  if (turnAirConditionerOn(airNumber))
+  {
+    res.sendStatus(200);
+  }
+  else
+  {
+    res.sendStatus(400);
+  }
+  // Logs to serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.print("Turned [ON] air number ");
+  Serial.println(airNumber);
+}
+
+// Handles the POST method of the route "/turnoff/single/:airNumber"
+// to turn off a single air-conditioner.
+void handleTurnOffSingleAirRoute(Request &req, Response &res)
+{
+  // Extracts the air number from the request
+  int airNumber = getAirNumberAsIntFromRequest(req);
+  //Turns off the air-conditioner
+  turnAirConditionerOff(airNumber);
+  // Logs to serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.print("Turned [OFF] air number ");
+  Serial.println(airNumber);
+}
+
+// Handles the POST method of the route "/turnoff/all"
+// to turn on all the air-conditioners.
+void handleTurnOnAllAirRoute(Request &req, Response &res)
+{
+  // Turn devices on
+  if (turnAirConditionerOn(1) &&
+      turnAirConditionerOn(2))
+  {
+    res.sendStatus(200);
+  }
+  else
+  {
+    res.sendStatus(400);
+  }
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.println("Turned [ON] all air-conditioners!");
+}
+
+// Handles the POST method of the route "/turnoff/all"
+// to turn off all the air-conditioners.
+void handleTurnOffAllAirRoute(Request &req, Response &res)
+{
+  // Turn devices off
+  turnAirConditionerOff(1);
+  turnAirConditionerOff(2);
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.println("Turned [OFF] all air-conditioners!");
+}
+
+// Handles the POST method of the route "/setvar/mintemp"
+// to set the var of the minimum tempeperature allowed
+void handleSetMinTempRoute(Request &req, Response &res)
+{
+  setMinTemp(getTempAsDoubleFromRequest(req));
+
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.println("The minimum temperature was set to ");
+  Serial.println(currentMinTemp);
+  Serial.println("*C.");
+}
+
+// Handles the POST method of the route "/setvar/mintemp"
+// to set the var of the minimum tempeperature allowed
+void handleSetMaxTempRoute(Request &req, Response &res)
+{
+  setMaxTemp(getTempAsDoubleFromRequest(req));
+
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.println("The maximum temperature was set to ");
+  Serial.println(currentMaxTemp);
+  Serial.println("*C.");
+}
+
+// Handles the POST method of the route "/setvar/mintemp"
+// to set the var of the minimum tempeperature allowed
+void handleResetTempsRoute(Request &req, Response &res)
+{
+  resetTemps();
+
+  // Logs to Serial
+  Serial.println("----------------------------------------------------------------");
+  Serial.println("Bounding temperatures were reset to MIN[");
+  Serial.println(currentMinTemp);
+  Serial.println("*C] and MAX[");
+  Serial.println(currentMaxTemp);
+  Serial.println("*C].");
+}
+
+// Extracts the number (as an INT) of the air-conditioner
+// from a request that awaits for an "airNumber" parameter.
+int getAirNumberAsIntFromRequest(Request &req)
+{
+  // Buffer
+  char airNumber[2];
+  // Passing the name of the parameter we want to find
+  req.route("airNumber", airNumber, sizeof(airNumber));
+  // Cast from char[] to int
+  int number = atoi(airNumber);
+  // Free memory space
+  free(airNumber);
+
+  return number;
+}
+
+// Extracts the number (as an INT) of the air-conditioner
+// from a request that awaits for an "airNumber" parameter.
+int getTempAsDoubleFromRequest(Request &req)
+{
+  // Buffer
+  char temp[16];
+  // Passing the name of the parameter we want to find
+  req.route("temp", temp, sizeof(temp));
+  // Cast from char[] to int
+  double tempAsDouble = atof(temp);
+  // Free memory space
+  free(temp);
+
+  return tempAsDouble;
+}
+
+boolean isTokenVerified(char *token)
+{
+  const char *key = token;
+  return strcmp(token, server_key) == 0;
 }
